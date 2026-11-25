@@ -6,9 +6,9 @@ via ntfy.sh whenever a goalie becomes "Confirmed" (or a confirmed goalie changes
 
 Setup:
   pip install requests
-  1. Install the ntfy app on your phone, subscribe to a hard-to-guess topic.
-  2. Set NTFY_TOPIC below (or as an env var).
-  3. python goalie_alerts.py            # loops every 10 min
+1. Install the ntfy app on your phone, subscribe to a hard-to-guess topic.
+2. Set NTFY_TOPIC below (or as an env var).
+3. python goalie_alerts.py            # loops every 10 min
      python goalie_alerts.py --once     # single check (for cron / Actions)
      python goalie_alerts.py --debug    # dumps the page JSON to debug.json
 """
@@ -29,13 +29,23 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (personal goalie alert script)"}
 def fetch_games(day: str):
     url = f"https://www.dailyfaceoff.com/starting-goalies/{day}"
     html = requests.get(url, headers=HEADERS, timeout=20).text
+    
+    # Try looking for __NEXT_DATA__ first
     m = re.search(
         r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
         html, re.S,
     )
     if not m:
-        raise RuntimeError("Could not find __NEXT_DATA__ on the page")
-    data = json.loads(m.group(1))
+        # Fallback to other embedded JSON data blocks if the tag ID changes
+        m = re.search(r'\{"props":.*?\n\s*</script>', html, re.S)
+        if not m:
+            raise RuntimeError("Could not find game data on the page layout")
+            
+    raw_json = m.group(1).strip() if m.lastindex and m.group(1) else m.group(0)
+    # Clean trailing script tag closing chars if matched by fallback
+    raw_json = re.sub(r'</script>\s*$', '', raw_json)
+    
+    data = json.loads(raw_json)
     if "--debug" in sys.argv:
         Path("debug.json").write_text(json.dumps(data, indent=2))
     return list(find_games(data))
