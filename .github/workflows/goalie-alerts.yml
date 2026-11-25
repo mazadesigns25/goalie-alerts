@@ -21,7 +21,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install requests
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
 
       # Restore the "already alerted" list from the previous run
       - uses: actions/cache/restore@v4
