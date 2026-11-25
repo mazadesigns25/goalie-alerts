@@ -1,4 +1,4 @@
-#!/usr/init/env python3
+#!/usr/bin/env python3
 """
 NHL confirmed-goalie alerts.
 Scrapes Daily Faceoff's starting goalies page directly and sends a push notification
