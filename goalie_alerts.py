@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
 NHL confirmed-goalie alerts.
-Scrapes Daily Faceoff's starting goalies page directly and sends a push notification
-via ntfy.sh whenever a goalie becomes "Confirmed" (or a confirmed goalie changes).
-
-Setup:
-  pip install requests beautifulsoup4
+Scrapes Daily Faceoff's starting goalies page and sends a push notification
+via ntfy.sh whenever a goalie becomes "Confirmed".
 """
 import json, os, sys, time
 from datetime import datetime
@@ -22,50 +19,39 @@ EASTERN = ZoneInfo("America/New_York")
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
 
-def fetch_games(day: str):
+def fetch_confirmed_goalies(day: str):
     url = f"https://www.dailyfaceoff.com/starting-goalies/{day}"
     resp = requests.get(url, headers=HEADERS, timeout=20)
     if resp.status_code != 200:
-        return []
+        return {}
     
     soup = BeautifulSoup(resp.text, "html.parser")
-    
-    # Target Daily Faceoff's specific game matchup and goalie card containers
-    cards = soup.find_all(["div", "section", "article"], class_=lambda c: c and any(term in c.lower() for term in ["matchup", "goalie", "game-card", "starting-goalie"]))
-    
+    confirmed_goalies = {}
+
+    # Target specific player or goalie card items on the page
+    cards = soup.find_all(["div", "article", "li"], class_=lambda c: c and any(term in c.lower() for term in ["goalie", "player", "matchup"]))
     if not cards:
         cards = soup.find_all("div")
-        
-    return cards
 
-
-def extract_alerts(game_cards):
-    """Parse specific goalie names and confirmed statuses from Daily Faceoff."""
-    out = {}
-    for i, card in enumerate(game_cards):
-        text = card.get_text(" | ", strip=True)
-        
-        # Look for blocks containing confirmation markers
+    for card in cards:
+        text = card.get_text(" ", strip=True)
+        # Look only for blocks that explicitly indicate confirmed starting status
         if "confirmed" in text.lower():
             lines = [line.strip() for line in card.get_text("\n", strip=True).split("\n") if line.strip()]
             
             goalie_name = None
             for idx, line in enumerate(lines):
-                if "confirmed" in line.lower():
-                    # Look right above the confirmation badge for the player's name
-                    if idx > 0:
-                        potential_name = lines[idx - 1]
-                        # Filter out header labels or team names to isolate the player name
-                        if len(potential_name.split()) in [2, 3] and "vs" not in potential_name.lower():
-                            goalie_name = potential_name
-                            break
+                if "confirmed" in line.lower() and idx > 0:
+                    potential_name = lines[idx - 1]
+                    # Filter to ensure it looks like a valid player name (2-3 words, no matchup text)
+                    if len(potential_name.split()) in [2, 3] and "vs" not in potential_name.lower():
+                        goalie_name = potential_name
+                        break
             
             if goalie_name:
-                key = f"goalie_{i}_{goalie_name.replace(' ', '_')}"
-                detail = f"{goalie_name} has been officially confirmed as the starting goalie."
-                out[key] = (goalie_name, detail)
+                confirmed_goalies[goalie_name] = f"{goalie_name} has been officially confirmed as the starting goalie."
                 
-    return out
+    return confirmed_goalies
 
 
 def notify(goalie, detail):
@@ -78,21 +64,24 @@ def notify(goalie, detail):
 
 
 def check_once():
+    # Load previously sent state
     state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
     today = datetime.now(EASTERN).strftime("%Y-%m-%d")
+    
+    # Keep only today's records in state memory
     state = {k: v for k, v in state.items() if k.startswith(today)}
 
-    cards = fetch_games(today)
-    if not cards:
-        print("No game cards parsed from Daily Faceoff.")
+    goalies = fetch_confirmed_goalies(today)
+    if not goalies:
+        print("No confirmed goalies found yet.")
         
-    alerts = extract_alerts(cards)
-    for key, (goalie, detail) in alerts.items():
-        skey = f"{today}:{key}"
-        if state.get(skey) != goalie:
+    for goalie, detail in goalies.items():
+        skey = f"{today}:{goalie}"
+        # Only notify if we haven't already sent an alert for this specific goalie today
+        if state.get(skey) != "sent":
             notify(goalie, detail)
-            print(f"Sent: {goalie} — {detail}")
-            state[skey] = goalie
+            print(f"Sent alert: {goalie}")
+            state[skey] = "sent"
             
     STATE_FILE.write_text(json.dumps(state))
 
