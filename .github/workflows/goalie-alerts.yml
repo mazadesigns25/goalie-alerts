@@ -1,0 +1,43 @@
+name: Goalie alerts
+
+on:
+  schedule:
+    # Every 5 min, 14:00-03:59 UTC (covers ~9 AM-11 PM ET, both EST and EDT)
+    - cron: "*/5 14-23,0-3 * * *"
+  workflow_dispatch: # lets you run it manually from the Actions tab
+
+concurrency:
+  group: goalie-alerts
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      # Restore the "already alerted" list from the previous run
+      - uses: actions/cache/restore@v4
+        with:
+          path: sent_goalies.json
+          key: goalies-state-${{ github.run_id }}
+          restore-keys: goalies-state-
+
+      - name: Check goalies
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python goalie_alerts.py --once
+
+      # Save it for the next run
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: sent_goalies.json
+          key: goalies-state-${{ github.run_id }}
