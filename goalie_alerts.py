@@ -1,88 +1,81 @@
 #!/usr/bin/env python3
 """
 NHL confirmed-goalie alerts.
-Polls Daily Faceoff's starting goalies page and sends a push notification
+Scrapes Daily Faceoff's starting goalies page directly and sends a push notification
 via ntfy.sh whenever a goalie becomes "Confirmed" (or a confirmed goalie changes).
 
 Setup:
-  pip install requests
-1. Install the ntfy app on your phone, subscribe to a hard-to-guess topic.
-2. Set NTFY_TOPIC below (or as an env var).
-3. python goalie_alerts.py            # loops every 10 min
-     python goalie_alerts.py --once     # single check (for cron / Actions)
-     python goalie_alerts.py --debug    # dumps the page JSON to debug.json
+  pip install requests beautifulsoup4
 """
-import json, os, re, sys, time
+import os, sys, time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
+from bs4 import BeautifulSoup
 
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "zach-goalies-CHANGE-ME")
 POLL_SECONDS = 600
 STATE_FILE = Path("sent_goalies.json")
 EASTERN = ZoneInfo("America/New_York")
-HEADERS = {"User-Agent": "Mozilla/5.0 (personal goalie alert script)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
 
 def fetch_games(day: str):
     url = f"https://www.dailyfaceoff.com/starting-goalies/{day}"
-    html = requests.get(url, headers=HEADERS, timeout=20).text
+    resp = requests.get(url, headers=HEADERS, timeout=20)
+    if resp.status_code != 200:
+        return []
     
-    # Try looking for __NEXT_DATA__ first
-    m = re.search(
-        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
-        html, re.S,
-    )
-    if not m:
-        # Fallback to other embedded JSON data blocks if the tag ID changes
-        m = re.search(r'\{"props":.*?\n\s*</script>', html, re.S)
-        if not m:
-            raise RuntimeError("Could not find game data on the page layout")
-            
-    raw_json = m.group(1).strip() if m.lastindex and m.group(1) else m.group(0)
-    # Clean trailing script tag closing chars if matched by fallback
-    raw_json = re.sub(r'</script>\s*$', '', raw_json)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    games_data = []
+
+    # Daily Faceoff structures matchups into distinct game blocks / cards
+    # We look for game cards or matchup containers on the page
+    matchup_cards = soup.find_all(lambda tag: tag.name == "div" and any("matchup" in c.lower() for c in tag.get("class", [])))
     
-    data = json.loads(raw_json)
-    if "--debug" in sys.argv:
-        Path("debug.json").write_text(json.dumps(data, indent=2))
-    return list(find_games(data))
+    if not matchup_cards:
+        # Fallback layout: find general container sections holding team names & goalies
+        matchup_cards = soup.find_all("section")
+
+    for card in matchup_cards:
+        text_content = card.get_text(" ", strip=True)
+        if "vs" in text_content.lower() or "-" in text_content:
+            games_data.append(card)
+
+    return games_data
 
 
-def find_games(node):
-    """Walk the JSON and yield any dict that looks like a game with goalie fields."""
-    if isinstance(node, dict):
-        if any(k.endswith("GoalieName") for k in node):
-            yield node
-        for v in node.values():
-            yield from find_games(v)
-    elif isinstance(node, list):
-        for v in node:
-            yield from find_games(v)
-
-
-def extract_alerts(games):
-    """Return {key: (goalie, message)} for every confirmed goalie."""
+def extract_alerts(game_cards):
+    """Parse goalies and statuses directly from Daily Faceoff HTML elements."""
     out = {}
-    for g in games:
-        when = g.get("date") or g.get("startTime") or g.get("gameTime") or ""
-        try:
-            t = datetime.fromisoformat(when.replace("Z", "+00:00")).astimezone(EASTERN)
-            when_str = t.strftime("%-I:%M %p ET")
-        except Exception:
-            when_str = ""
-        for side, other in (("home", "away"), ("away", "home")):
-            name = g.get(f"{side}GoalieName")
-            status = str(
-                g.get(f"{side}NewsStrengthName") or g.get(f"{side}NewsStrength") or ""
-            ).lower()
-            team = g.get(f"{side}TeamName", "?")
-            opp = g.get(f"{other}TeamName", "?")
-            if name and status == "confirmed":
-                key = f"{g.get('gameId', team + opp)}:{side}"
-                out[key] = (name, f"{team} vs {opp} {when_str}".strip())
+    for i, card in enumerate(game_cards):
+        text = card.get_text(" | ", strip=True)
+        # Look for confirmation text blocks within the card
+        if "confirmed" not in text.lower():
+            continue
+            
+        # Extract names and statuses using card text parsing
+        # (Daily Faceoff lists goalie names alongside 'Confirmed' badges)
+        lines = [line.strip() for line in card.get_text("\n", strip=True).split("\n") if line.strip()]
+        
+        goalie_name = None
+        team_name = "Team"
+        opp_name = "Opponent"
+        is_confirmed = False
+
+        for idx, line in enumerate(lines):
+            if "confirmed" in line.lower():
+                is_confirmed = True
+                if idx > 0:
+                    goalie_name = lines[idx - 1] # Usually the line right before the confirmation status
+            
+        if is_confirmed and goalie_name:
+            key = f"game_{i}"
+            detail = f"Daily Faceoff Starting Goalies Update"
+            out[key] = (goalie_name, detail)
+            
     return out
 
 
@@ -98,17 +91,20 @@ def notify(goalie, detail):
 def check_once():
     state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
     today = datetime.now(EASTERN).strftime("%Y-%m-%d")
-    state = {k: v for k, v in state.items() if k.startswith(today)}  # drop old days
+    state = {k: v for k, v in state.items() if k.startswith(today)}
 
-    games = fetch_games(today)
-    if not games:
-        print("No games parsed (off day, or page layout changed — try --debug)")
-    for key, (goalie, detail) in extract_alerts(games).items():
+    cards = fetch_games(today)
+    if not cards:
+        print("No game cards parsed from Daily Faceoff.")
+        
+    alerts = extract_alerts(cards)
+    for key, (goalie, detail) in alerts.items():
         skey = f"{today}:{key}"
-        if state.get(skey) != goalie:  # new, or confirmed goalie changed
+        if state.get(skey) != goalie:
             notify(goalie, detail)
             print(f"Sent: {goalie} — {detail}")
             state[skey] = goalie
+            
     STATE_FILE.write_text(json.dumps(state))
 
 
