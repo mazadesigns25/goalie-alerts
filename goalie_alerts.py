@@ -29,45 +29,42 @@ def fetch_games(day: str):
         return []
     
     soup = BeautifulSoup(resp.text, "html.parser")
-    games_data = []
-
-    matchup_cards = soup.find_all(lambda tag: tag.name == "div" and any("matchup" in c.lower() for c in tag.get("class", [])))
     
-    if not matchup_cards:
-        matchup_cards = soup.find_all("section")
-
-    for card in matchup_cards:
-        text_content = card.get_text(" ", strip=True)
-        if "vs" in text_content.lower() or "-" in text_content:
-            games_data.append(card)
-
-    return games_data
+    # Target Daily Faceoff's specific game matchup and goalie card containers
+    cards = soup.find_all(["div", "section", "article"], class_=lambda c: c and any(term in c.lower() for term in ["matchup", "goalie", "game-card", "starting-goalie"]))
+    
+    if not cards:
+        cards = soup.find_all("div")
+        
+    return cards
 
 
 def extract_alerts(game_cards):
-    """Parse goalies and statuses directly from Daily Faceoff HTML elements."""
+    """Parse specific goalie names and confirmed statuses from Daily Faceoff."""
     out = {}
     for i, card in enumerate(game_cards):
         text = card.get_text(" | ", strip=True)
-        if "confirmed" not in text.lower():
-            continue
-            
-        lines = [line.strip() for line in card.get_text("\n", strip=True).split("\n") if line.strip()]
         
-        goalie_name = None
-        is_confirmed = False
-
-        for idx, line in enumerate(lines):
-            if "confirmed" in line.lower():
-                is_confirmed = True
-                if idx > 0:
-                    goalie_name = lines[idx - 1]
+        # Look for blocks containing confirmation markers
+        if "confirmed" in text.lower():
+            lines = [line.strip() for line in card.get_text("\n", strip=True).split("\n") if line.strip()]
             
-        if is_confirmed and goalie_name:
-            key = f"game_{i}"
-            detail = f"Daily Faceoff Starting Goalies Update"
-            out[key] = (goalie_name, detail)
+            goalie_name = None
+            for idx, line in enumerate(lines):
+                if "confirmed" in line.lower():
+                    # Look right above the confirmation badge for the player's name
+                    if idx > 0:
+                        potential_name = lines[idx - 1]
+                        # Filter out header labels or team names to isolate the player name
+                        if len(potential_name.split()) in [2, 3] and "vs" not in potential_name.lower():
+                            goalie_name = potential_name
+                            break
             
+            if goalie_name:
+                key = f"goalie_{i}_{goalie_name.replace(' ', '_')}"
+                detail = f"{goalie_name} has been officially confirmed as the starting goalie."
+                out[key] = (goalie_name, detail)
+                
     return out
 
 
