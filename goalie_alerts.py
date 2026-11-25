@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/init/env python3
 """
 NHL confirmed-goalie alerts.
 Scrapes Daily Faceoff's starting goalies page directly and sends a push notification
@@ -7,7 +7,7 @@ via ntfy.sh whenever a goalie becomes "Confirmed" (or a confirmed goalie changes
 Setup:
   pip install requests beautifulsoup4
 """
-import os, sys, time
+import json, os, sys, time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -31,12 +31,9 @@ def fetch_games(day: str):
     soup = BeautifulSoup(resp.text, "html.parser")
     games_data = []
 
-    # Daily Faceoff structures matchups into distinct game blocks / cards
-    # We look for game cards or matchup containers on the page
     matchup_cards = soup.find_all(lambda tag: tag.name == "div" and any("matchup" in c.lower() for c in tag.get("class", [])))
     
     if not matchup_cards:
-        # Fallback layout: find general container sections holding team names & goalies
         matchup_cards = soup.find_all("section")
 
     for card in matchup_cards:
@@ -52,24 +49,19 @@ def extract_alerts(game_cards):
     out = {}
     for i, card in enumerate(game_cards):
         text = card.get_text(" | ", strip=True)
-        # Look for confirmation text blocks within the card
         if "confirmed" not in text.lower():
             continue
             
-        # Extract names and statuses using card text parsing
-        # (Daily Faceoff lists goalie names alongside 'Confirmed' badges)
         lines = [line.strip() for line in card.get_text("\n", strip=True).split("\n") if line.strip()]
         
         goalie_name = None
-        team_name = "Team"
-        opp_name = "Opponent"
         is_confirmed = False
 
         for idx, line in enumerate(lines):
             if "confirmed" in line.lower():
                 is_confirmed = True
                 if idx > 0:
-                    goalie_name = lines[idx - 1] # Usually the line right before the confirmation status
+                    goalie_name = lines[idx - 1]
             
         if is_confirmed and goalie_name:
             key = f"game_{i}"
